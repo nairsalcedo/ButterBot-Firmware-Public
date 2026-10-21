@@ -282,12 +282,18 @@ void DanceRoutine::onButtonEvent(int button, ISRButtonInput::Action action){
 
 void DanceRoutine::onProximityReading(ProxState front, ProxState bottom){
 	proxReadingReceived = true;
-	proxUnsafe = (front == ProxState::Covered);
+	// Nair: también el sensor de abajo; sin piso debajo (orilla de la mesa) no baila.
+	proxUnsafe = (front == ProxState::Covered) || (bottom == ProxState::Uncovered);
 }
 
 void DanceRoutine::onProximityChange(ProxSensor sensor, bool state){
 	if(sensor == ProxSensor::Front && state){
 		CMF_LOG(DanceRoutine, Debug, "front obstacle");
+		interrupted = true;
+	}
+	// Nair: el sensor de abajo perdió el piso (orilla o lo levantaron): dejar de bailar.
+	if(sensor == ProxSensor::Bottom && !state){
+		CMF_LOG(DanceRoutine, Debug, "bottom lost the floor");
 		interrupted = true;
 	}
 }

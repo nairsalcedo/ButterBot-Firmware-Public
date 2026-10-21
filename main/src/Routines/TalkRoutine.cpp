@@ -20,6 +20,10 @@
 #include <freertos/event_groups.h>
 #include <freertos/semphr.h>
 #include <string>
+#include <strings.h>
+#include <Scenarios.h>
+#include "EventBag.h"
+#include "Battery/Battery.h"
 #include "Audio/AudioFrontend.h"
 #include "Audio/MicInput.h"
 #include "Audio/SpeechAudioGen.h"
@@ -320,10 +324,53 @@ namespace {
 		uint64_t recordEndMs = 0; // se escribe antes de recordingDone
 		std::atomic<bool> cancelled{ false };
 		std::atomic<bool> finished{ false };
+		// Estado del robot que viaja con la pregunta (para «¿cuánta batería tienes?», «¿cómo te sientes?»).
+		int battery = -1;
+		const char* charging = "unknown";
+		uint32_t uptimeMin = 0;
 		std::string reply;
+		std::string action; // rutina de fábrica que Claude pidió (header X-Action), o vacía
 		bool ok = false;
 		SemaphoreHandle_t done = nullptr;
 	};
+
+	// Acciones que Claude puede pedir → rutinas de fábrica (las mismas que la app del teléfono).
+	// Debe coincidir con ACTIONS en butterbot-server/server.py.
+	struct TalkAction {
+		const char* name;
+		BB::Action::Scenario scenario;
+		ScenarioData data;
+	};
+	const TalkAction TalkActions[] = {
+		{ "dance", BB::Action::Scenario::Dance, {} },
+		{ "forward", BB::Action::Scenario::VoiceControl, VoiceScenarioData{ VoiceScenarioData::Direction::Forward } },
+		{ "backward", BB::Action::Scenario::VoiceControl, VoiceScenarioData{ VoiceScenarioData::Direction::Backward } },
+		{ "left", BB::Action::Scenario::VoiceControl, VoiceScenarioData{ VoiceScenarioData::Direction::Left } },
+		{ "right", BB::Action::Scenario::VoiceControl, VoiceScenarioData{ VoiceScenarioData::Direction::Right } },
+		{ "turn_around", BB::Action::Scenario::VoiceControl, VoiceScenarioData{ VoiceScenarioData::Direction::Rotate } },
+		{ "dice", BB::Action::Scenario::DiceRoll, DiceScenarioData{ DiceScenarioData::DiceType::D6 } },
+		{ "eight_ball", BB::Action::Scenario::EightBall, {} },
+		{ "pass_butter", BB::Action::Scenario::PassTheButter, {} },
+		{ "whats_this", BB::Action::Scenario::WhatsThis, {} },
+		{ "who_am_i", BB::Action::Scenario::FaceDetect, FaceScenarioData{ FaceScenarioData::Phase::Detect } },
+		{ "remember_face", BB::Action::Scenario::FaceDetect, FaceScenarioData{ FaceScenarioData::Phase::Remember } },
+		{ "forget_face", BB::Action::Scenario::FaceDetectForget, FaceScenarioData{ FaceScenarioData::Phase::Forget } },
+		{ "shutdown", BB::Action::Scenario::Shutdown, {} },
+	};
+
+	// La rutina corre cuando el robot regresa a reposo (IdleState la saca del EventBag).
+	void queueAction(const std::string& name){
+		for(const TalkAction& a : TalkActions){
+			if(name == a.name){
+				if(EventBag* bag = ApplicationStatics::getApplication()->getService<EventBag>()){
+					bag->queueScenario(a.scenario, a.data);
+					ESP_LOGW(TAG, "Acción pedida: %s", a.name);
+				}
+				return;
+			}
+		}
+		ESP_LOGW(TAG, "Acción desconocida: %s", name.c_str());
+	}
 
 	bool expired(NetJob* job, uint64_t deadline){
 		return job->cancelled || nowMs() > deadline;
@@ -420,12 +467,25 @@ namespace {
 		cfg.timeout_ms = ConnectTimeoutMs;
 		cfg.buffer_size = 1024;
 		cfg.buffer_size_tx = 1024;
+		cfg.user_data = job;
+		cfg.event_handler = [](esp_http_client_event_t* evt) -> esp_err_t {
+			if(evt->event_id == HTTP_EVENT_ON_HEADER && evt->header_key && evt->header_value && strcasecmp(evt->header_key, "X-Action") == 0){
+				static_cast<NetJob*>(evt->user_data)->action = evt->header_value;
+			}
+			return ESP_OK;
+		};
 
 		esp_http_client_handle_t client = esp_http_client_init(&cfg);
 		if(client == nullptr) return false;
 
 		esp_http_client_set_header(client, "X-Token", TALK_TOKEN);
 		esp_http_client_set_header(client, "Content-Type", "audio/x-ima-adpcm");
+		char value[16];
+		snprintf(value, sizeof(value), "%d", job->battery);
+		esp_http_client_set_header(client, "X-Battery", value);
+		esp_http_client_set_header(client, "X-Charging", job->charging);
+		snprintf(value, sizeof(value), "%u", (unsigned) job->uptimeMin);
+		esp_http_client_set_header(client, "X-Uptime", value);
 
 		const uint64_t deadline = nowMs() + RequestDeadlineMs;
 		bool ok = false;
@@ -496,6 +556,15 @@ Routine::TickingState TalkRoutine::tick(float deltaTime){
 	job->wifiStarted = net != nullptr;
 	job->samples = samples;
 	job->done = xSemaphoreCreateBinary();
+	if(const Battery* battery = app->getService<Battery>()){
+		job->battery = (int) lroundf(std::clamp(battery->getPerc(), 0.0f, 100.0f));
+		switch(battery->getChargingState()){
+			case ChargingState::Unplugged: job->charging = "unplugged"; break;
+			case ChargingState::Charging: job->charging = "charging"; break;
+			case ChargingState::Full: job->charging = "full"; break;
+		}
+	}
+	job->uptimeMin = (uint32_t) (nowMs() / 60000);
 
 	TaskHandle_t netHandle = nullptr;
 	const bool netStarted = samples && job->done &&
@@ -585,6 +654,7 @@ Routine::TickingState TalkRoutine::tick(float deltaTime){
 		say(audio, "I cannot reach my brain. Is the laptop on?", true);
 	}else{
 		say(audio, job->reply.c_str(), true);
+		if(!job->action.empty()) queueAction(job->action); // p. ej. bailar, al regresar a reposo
 	}
 
 	return TickingState::Done;

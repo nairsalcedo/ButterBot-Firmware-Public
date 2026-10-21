@@ -130,11 +130,16 @@ void MovementCommandRoutine::speak(Phrase phrase){
 
 void MovementCommandRoutine::onProximityReading(ProxState front, ProxState bottom){
 	proxReadingReceived = true;
-	proxUnsafe = (front == ProxState::Covered);
+	// Nair: también el sensor de abajo; sin piso debajo (orilla de la mesa) no se mueve.
+	proxUnsafe = (front == ProxState::Covered) || (bottom == ProxState::Uncovered);
 }
 
 void MovementCommandRoutine::onProximityChange(ProxSensor sensor, bool state){
 	if(sensor == ProxSensor::Front && state){
+		proxInterrupted = true;
+	}
+	// Nair: el sensor de abajo perdió el piso (orilla o lo levantaron): parar las ruedas.
+	if(sensor == ProxSensor::Bottom && !state){
 		proxInterrupted = true;
 	}
 }

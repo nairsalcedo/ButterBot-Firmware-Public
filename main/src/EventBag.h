@@ -100,6 +100,10 @@ public:
 	void startIntruderMonitoring();
 	void stopIntruderMonitoring();
 
+	// Nair: la plática con Claude pide rutinas de fábrica (bailar, moverse…) igual que la app del teléfono.
+	// Llamar desde el hilo de la máquina de estados (dueño de este EventBag).
+	void queueScenario(BB::Action::Scenario scenario, ScenarioData data){ onScenario(scenario, data); }
+
 private:
 	std::vector<EventData> events;
 
