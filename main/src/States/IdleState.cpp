@@ -23,6 +23,7 @@
 #include "Routines/EventRoutines/GasConfiguredEventRoutine.h"
 #include "Routines/EventRoutines/SummonEventRoutine.h"
 #include "Routines/WanderRoutine.h"
+#include "Routines/TalkRoutine.h"
 
 DEFINE_LOG(IdleState)
 
@@ -110,6 +111,16 @@ void IdleState::tick(float deltaTime){
 
 	if(eventBag == nullptr){
 		CMF_LOG(IdleState, LogLevel::Error, "Event Bag is nullptr.");
+		return;
+	}
+
+	// Un solo toque y ya pasó la ventana del doble toque → plática con Claude.
+	if(pendingTapDeadline != 0 && millis() > pendingTapDeadline){
+		pendingTapDeadline = 0;
+		if(sm->getActiveRoutine() != nullptr){
+			endActiveRoutine();
+		}
+		startTalk();
 		return;
 	}
 
@@ -263,6 +274,12 @@ int64_t IdleState::getDynamicTickInterval() const{
 		return 0;
 	}
 
+	// Despertar cuando se acabe la ventana del doble toque.
+	if(pendingTapDeadline != 0){
+		const uint64_t now = millis();
+		return now >= pendingTapDeadline ? 0 : (int64_t) (pendingTapDeadline - now);
+	}
+
 	if(sm->getActiveRoutine() != nullptr){
 		if(lastTickingState == Routine::TickingState::Continue){
 			return 0;
@@ -328,5 +345,23 @@ void IdleState::onButtonEvent(int button, ISRButtonInput::Action action){
 		return;
 	}
 
-	sm->transitionTo<ListenState>();
+	// Segundo toque dentro de la ventana → comandos de voz de fábrica.
+	if(pendingTapDeadline != 0 && millis() <= pendingTapDeadline){
+		pendingTapDeadline = 0;
+		sm->transitionTo<ListenState>();
+		return;
+	}
+
+	// Primer toque: si no llega otro, tick() arranca la plática con Claude.
+	pendingTapDeadline = millis() + DoubleTapWindow;
+}
+
+void IdleState::startTalk(){
+	if(!ServiceLocator::ScenarioRoutineServiceInstance){
+		CMF_LOG(IdleState, LogLevel::Error, "ScenarioRoutineService missing");
+		return;
+	}
+
+	ServiceLocator::ScenarioRoutineServiceInstance->setRoutineFactory(&makeRoutine<TalkRoutine>);
+	sm->transitionTo<ScenarioState>();
 }

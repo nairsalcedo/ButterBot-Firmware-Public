@@ -42,6 +42,8 @@
 #include "States/ScenarioState.h"
 #include "Services/ScenarioRoutineService.h"
 #include "Periph/Bluetooth.h"
+#include <esp_bt.h>
+#include "Util/NairConfig.h"
 #include "BLE/GAP.h"
 #include "BLE/Client.h"
 #include "BLE/Server.h"
@@ -268,7 +270,13 @@ protected:
 		BM8563* rtc = registerDevice<BM8563>(i2c_main, HardwareConfiguration::getRTCAddress());
 		Time* timeService = registerService<Time>(rtc, /*internalStack=*/false);
 
-		auto bt = new Bluetooth();
+		if constexpr(Nair::Bluetooth){
+			new Bluetooth();
+		}else{
+			// Sin Bluetooth (ver Util/NairConfig.h): la RAM que tenía reservada regresa al heap para el WiFi.
+			// Los servicios BLE de abajo se crean igual; sus llamadas fallan sin efecto.
+			esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+		}
 		auto gap = new BLE::GAP();
 		auto client = new BLE::Client(gap);
 		auto server = new BLE::Server(gap);

@@ -42,6 +42,10 @@ private:
 	// Poke/Motion events handled before this time are stale (queued while a routine ran) and are dropped.
 	uint64_t instantEventCutoff = 0;
 
+	// Nair: un toque → plática con Claude; dos toques seguidos → comandos de voz de fábrica.
+	uint64_t pendingTapDeadline = 0; // 0 = no hay toque esperando a ver si llega el segundo
+	static constexpr uint64_t DoubleTapWindow = 400; // ms
+
 	static constexpr uint64_t MaximumBtnHoldForTransition = 500;
 	static constexpr uint64_t StaleEventWindow = 100; // ms
 
@@ -58,6 +62,7 @@ private:
 	void endActiveRoutine();
 	void startEventRoutine(const EventBag::EventData& data);
 	void startScenario(const EventBag::EventData& data);
+	void startTalk();
 	void maybeStartRandomRoutine();
 	RoutineFactory pickRandomRoutine() const;
 	void rescheduleRandomRoutine();
