@@ -43,6 +43,7 @@ struct BB {
 			PhonePlayMusic,
 			PhoneStopMusic,
 			WhatsThis,
+			Talk, // Nair: plática con Claude por WiFi
 		} scenario;
 
 		enum class Listen {

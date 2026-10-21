@@ -1,6 +1,7 @@
 #include "ScenarioRoutineMappings.h"
 #include "Routines/FactRoutine.h"
 #include "Routines/JokeRoutine.h"
+#include "Routines/TalkRoutine.h"
 #include "Routines/ProfanityRoutine.h"
 #include "Routines/PassTheButterRoutine.h"
 #include "Routines/YouPassButterRoutine.h"
@@ -50,6 +51,7 @@ namespace {
 	const ScenarioRoutineMapping Mappings[] = {
 		{ { BB::Action::Scenario::Fact, {} }, &makeRoutine<FactRoutine> },
 		{ { BB::Action::Scenario::Joke, {} }, &makeRoutine<JokeRoutine> },
+		{ { BB::Action::Scenario::Talk, {} }, &makeRoutine<TalkRoutine> },
 		{ { BB::Action::Scenario::PassTheButter, {} }, &makeRoutine<PassTheButterRoutine> },
 		{ { BB::Action::Scenario::YouPassButter, {} }, &makeRoutine<YouPassButterRoutine> },
 		{ { BB::Action::Scenario::Profanity, {} }, &makeRoutine<ProfanityRoutine> },

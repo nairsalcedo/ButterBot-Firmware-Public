@@ -10,3 +10,5 @@ spiffs.bin
 venv
 
 managed_components
+# Secretos del Butter Bot (WiFi y token)
+main/src/Util/TalkSecrets.h
