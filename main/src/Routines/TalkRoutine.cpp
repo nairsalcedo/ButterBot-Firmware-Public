@@ -11,6 +11,8 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <freertos/event_groups.h>
+#include <freertos/semphr.h>
+#include <string>
 #include "Audio/AudioFrontend.h"
 #include "Audio/MemoryAudioSource.h"
 #include "Audio/MicInput.h"
@@ -28,8 +30,10 @@ namespace {
 	constexpr uint32_t RecordMs = 5000;
 	constexpr size_t RecordSamples = SampleRate * RecordMs / 1000;
 	constexpr size_t MaxReplyBytes = SampleRate * 2 * 25; // 25 s de respuesta como máximo
+	constexpr size_t MaxClipBytes = SampleRate * 2 * 4; // «sigo pensando»: 4 s como máximo
 	constexpr uint32_t WiFiTimeoutMs = 15000;
-	constexpr int HttpTimeoutMs = 60000;
+	constexpr int HttpTimeoutMs = 120000; // leer Obsidian u Opus puede tardar casi un minuto
+	constexpr uint32_t ThinkingEveryMs = 10000;
 
 	constexpr EventBits_t GotIPBit = BIT0;
 
@@ -116,21 +120,22 @@ namespace {
 		if(wait) audio->waitEnd(portMAX_DELAY);
 	}
 
-	// Manda el audio grabado y guarda la respuesta (PCM 16 kHz mono) en reply.
-	bool post(const int16_t* samples, size_t count, PSRAMByteBuffer& reply){
+	// Hace la petición al servidor y guarda lo que regresa (PCM 16 kHz mono) en reply.
+	// samples == nullptr → GET; si no, POST con el audio grabado.
+	bool request(const char* url, const int16_t* samples, size_t count, PSRAMByteBuffer& reply, size_t maxBytes, int timeoutMs){
 		esp_http_client_config_t cfg = {};
-		cfg.url = TALK_SERVER_URL;
-		cfg.method = HTTP_METHOD_POST;
-		cfg.timeout_ms = HttpTimeoutMs;
+		cfg.url = url;
+		cfg.method = samples ? HTTP_METHOD_POST : HTTP_METHOD_GET;
+		cfg.timeout_ms = timeoutMs;
 		cfg.buffer_size = 4096;
 
 		esp_http_client_handle_t client = esp_http_client_init(&cfg);
 		if(client == nullptr) return false;
 
 		esp_http_client_set_header(client, "X-Token", TALK_TOKEN);
-		esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
+		if(samples) esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
 
-		const int bodyLen = (int) (count * sizeof(int16_t));
+		const int bodyLen = samples ? (int) (count * sizeof(int16_t)) : 0;
 		bool ok = false;
 
 		if(esp_http_client_open(client, bodyLen) == ESP_OK){
@@ -146,9 +151,9 @@ namespace {
 				const int status = esp_http_client_get_status_code(client);
 				CMF_LOG(TalkRoutine, LogLevel::Info, "HTTP %d", status);
 				if(status == 200){
-					reply.reserve(64 * 1024);
+					reply.reserve(samples ? 64 * 1024 : 16 * 1024);
 					char chunk[2048];
-					while(reply.size() < MaxReplyBytes){
+					while(reply.size() < maxBytes){
 						const int r = esp_http_client_read(client, chunk, sizeof(chunk));
 						if(r <= 0) break;
 						reply.insert(reply.end(), chunk, chunk + r);
@@ -163,6 +168,28 @@ namespace {
 		esp_http_client_close(client);
 		esp_http_client_cleanup(client);
 		return ok;
+	}
+
+	// La petición principal corre en su propia tarea para que el robot pueda decir «sigo pensando» mientras espera.
+	struct PostJob {
+		const int16_t* samples;
+		size_t count;
+		PSRAMByteBuffer reply;
+		bool ok = false;
+		SemaphoreHandle_t done;
+	};
+
+	void postTask(void* arg){
+		auto* job = static_cast<PostJob*>(arg);
+		job->ok = request(TALK_SERVER_URL, job->samples, job->count, job->reply, MaxReplyBytes, HttpTimeoutMs);
+		xSemaphoreGive(job->done);
+		vTaskDelete(nullptr);
+	}
+
+	// TALK_SERVER_URL termina en /talk; el clip vive en /pensando del mismo servidor.
+	std::string thinkingUrl(){
+		std::string url = TALK_SERVER_URL;
+		return url.substr(0, url.rfind('/')) + "/pensando";
 	}
 }
 
@@ -205,14 +232,35 @@ Routine::TickingState TalkRoutine::tick(float deltaTime){
 
 	say(audio, "Let me think", false);
 
-	PSRAMByteBuffer reply;
+	PostJob job{ samples, recorded };
+	job.done = xSemaphoreCreateBinary();
 	bool ok = false;
-	if(wifiStarted && link->waitIP(WiFiTimeoutMs)){
-		ok = post(samples, recorded, reply);
+	if(job.done == nullptr){
+		CMF_LOG(TalkRoutine, LogLevel::Error, "Sin memoria para el semáforo");
+	}else if(wifiStarted && link->waitIP(WiFiTimeoutMs)){
+		// Clip de «sigo pensando» en español (si falla, se usa la voz del robot en inglés).
+		PSRAMByteBuffer thinking;
+		request(thinkingUrl().c_str(), nullptr, 0, thinking, MaxClipBytes, 5000);
+
+		if(xTaskCreate(postTask, "TalkPost", 8192, &job, 5, nullptr) == pdPASS){
+			while(xSemaphoreTake(job.done, pdMS_TO_TICKS(ThinkingEveryMs)) != pdTRUE){
+				audio->waitEnd(portMAX_DELAY);
+				if(!thinking.empty()){
+					PSRAMByteBuffer copy = thinking;
+					audio->play(ServiceLocator::SpeechAudioGenInstance.get(), std::make_unique<MemoryAudioSource>(std::move(copy)));
+				}else{
+					say(audio, "Still thinking", false);
+				}
+			}
+			ok = job.ok;
+		}else{
+			CMF_LOG(TalkRoutine, LogLevel::Error, "No se pudo crear la tarea de la petición");
+		}
 	}else{
 		CMF_LOG(TalkRoutine, LogLevel::Error, "No hubo WiFi: ¿está prendido el hotspot?");
 	}
 
+	if(job.done) vSemaphoreDelete(job.done);
 	heap_caps_free(samples);
 	link.reset(); // apagar el WiFi antes de hablar
 
@@ -223,7 +271,7 @@ Routine::TickingState TalkRoutine::tick(float deltaTime){
 		return TickingState::Done;
 	}
 
-	audio->play(ServiceLocator::SpeechAudioGenInstance.get(), std::make_unique<MemoryAudioSource>(std::move(reply)));
+	audio->play(ServiceLocator::SpeechAudioGenInstance.get(), std::make_unique<MemoryAudioSource>(std::move(job.reply)));
 	audio->waitEnd(portMAX_DELAY);
 
 	return TickingState::Done;
